@@ -1,16 +1,48 @@
-# wms_pro
+# ⚡ Node.js Starter Function
 
-A new Flutter project.
+A simple starter function. Edit `src/main.js` to get started and create something awesome! 🚀
 
-## Getting Started
+## 🧰 Usage
 
-This project is a starting point for a Flutter application.
+### GET /ping
 
-A few resources to get you started if this is your first Flutter project:
+- Returns a "Pong" message.
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+**Response**
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+Sample `200` Response:
+
+```text
+Pong
+```
+
+### GET, POST, PUT, PATCH, DELETE /
+
+- Returns a "Learn More" JSON response.
+
+**Response**
+
+Sample `200` Response:
+
+```json
+{
+  "motto": "Build like a team of hundreds_",
+  "learn": "https://appwrite.io/docs",
+  "connect": "https://appwrite.io/discord",
+  "getInspired": "https://builtwith.appwrite.io"
+}
+```
+
+## ⚙️ Configuration
+
+| Setting           | Value         |
+| ----------------- | ------------- |
+| Runtime           | Node (18.0)   |
+| Entrypoint        | `src/main.js` |
+| Build Commands    | `npm install` |
+| Permissions       | `any`         |
+| Timeout (Seconds) | 15            |
+
+## 🔒 Environment Variables
+
+No environment variables required.
