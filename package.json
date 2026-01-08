@@ -8,6 +8,7 @@
     "format": "prettier --write ."
   },
   "dependencies": {
+    "firebase": "^12.7.0",
     "node-appwrite": "^14.1.0"
   },
   "devDependencies": {

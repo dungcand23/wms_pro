@@ -21,6 +21,8 @@
   "quickSearch": "Tìm kiếm nhanh (Ctrl+K)",
   "newButton": "Tạo",
   "warehouse": "Kho",
+  "location": "Vị trí",
+  "status": "Trạng thái",
   "language": "Ngôn ngữ",
   "waitingApproval": "Chờ duyệt",
   "waitingPost": "Chờ post",

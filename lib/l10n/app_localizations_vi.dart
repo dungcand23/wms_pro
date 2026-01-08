@@ -72,6 +72,12 @@ class AppLocalizationsVi extends AppLocalizations {
   String get warehouse => 'Kho';
 
   @override
+  String get location => 'Vị trí';
+
+  @override
+  String get status => 'Trạng thái';
+
+  @override
   String get language => 'Ngôn ngữ';
 
   @override

@@ -72,6 +72,12 @@ class AppLocalizationsEn extends AppLocalizations {
   String get warehouse => 'Warehouse';
 
   @override
+  String get location => 'Location';
+
+  @override
+  String get status => 'Status';
+
+  @override
   String get language => 'Language';
 
   @override

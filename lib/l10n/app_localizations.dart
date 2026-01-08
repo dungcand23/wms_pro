@@ -224,6 +224,18 @@ abstract class AppLocalizations {
   /// **'Warehouse'**
   String get warehouse;
 
+  /// No description provided for @location.
+  ///
+  /// In en, this message translates to:
+  /// **'Location'**
+  String get location;
+
+  /// No description provided for @status.
+  ///
+  /// In en, this message translates to:
+  /// **'Status'**
+  String get status;
+
   /// No description provided for @language.
   ///
   /// In en, this message translates to:

@@ -21,6 +21,8 @@
   "quickSearch": "Quick Search (Ctrl+K)",
   "newButton": "New",
   "warehouse": "Warehouse",
+  "location": "Location",
+  "status": "Status",
   "language": "Language",
   "waitingApproval": "Waiting Approval",
   "waitingPost": "Waiting Post",
