@@ -1,13 +1,36 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
-import 'package:wms_pro/l10n/gen/app_localizations.dart';
+import 'package:wms_pro/l10n/app_localizations.dart';
 import '../../core/models/document.dart';
+import '../../core/models/document_template.dart';
 import '../../core/models/user.dart';
 import '../../core/providers.dart';
+import '../../core/scan/scan_parser.dart';
 import '../../ui/widgets/section_title.dart';
 import '../../ui/widgets/split_pane.dart';
+
+class _FocusScanIntent extends Intent {
+  const _FocusScanIntent();
+}
+
+class _BulkPasteIntent extends Intent {
+  const _BulkPasteIntent();
+}
+
+class _SaveTemplateIntent extends Intent {
+  const _SaveTemplateIntent();
+}
+
+class _PostIntent extends Intent {
+  const _PostIntent();
+}
+
+class _SaveDraftIntent extends Intent {
+  const _SaveDraftIntent();
+}
 
 class DocumentEditorPage extends ConsumerStatefulWidget {
   final String? docId;
@@ -30,6 +53,14 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
   String? selectedLotId;
   String? selectedUom;
   String? selectedReason;
+  String selectedStatus = 'AVAILABLE';
+  String? selectedToStatus; // used in STATUS_MOVE
+
+  bool autoAdd = true;
+  int _trfLocStep = 0; // 0=expect from, 1=expect to
+
+  final scanCtrl = TextEditingController();
+  final scanFocus = FocusNode();
 
   final qtyCtrl = TextEditingController(text: '5');
 
@@ -55,10 +86,19 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
   }
 
   @override
+  void dispose() {
+    qtyCtrl.dispose();
+    scanCtrl.dispose();
+    scanFocus.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final t = AppLocalizations.of(context);
+    final t = AppLocalizations.of(context)!;
     final db = ref.watch(localDbProvider);
     final actor = ref.watch(currentUserProvider);
+    final workflow = ref.watch(workflowEnabledProvider);
 
     final current = doc;
     if (current == null) return const Center(child: CircularProgressIndicator());
@@ -79,7 +119,17 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
 
     selectedReason ??= reasons.isNotEmpty ? reasons.first : null;
 
-    return Column(
+    // enforce defaults by type
+    if (current.docType == 'OUT' || current.docType == 'TRF') {
+      selectedStatus = 'AVAILABLE';
+    }
+    if (current.docType == 'STATUS_MOVE') {
+      selectedToStatus ??= (selectedStatus == 'AVAILABLE' ? 'HOLD' : 'AVAILABLE');
+    } else {
+      selectedToStatus = null;
+    }
+
+    final content = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         SectionTitle('Documents / ${current.docType} • ${current.docNo}'),
@@ -92,9 +142,432 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
           ),
         ),
         const SizedBox(height: 10),
-        _bottomBar(db, actor, current),
+        _bottomBar(db, actor, current, workflow),
       ],
     );
+
+    return Shortcuts(
+      shortcuts: const {
+        SingleActivator(LogicalKeyboardKey.keyL, control: true): _FocusScanIntent(),
+        SingleActivator(LogicalKeyboardKey.keyV, control: true, shift: true): _BulkPasteIntent(),
+        SingleActivator(LogicalKeyboardKey.keyT, control: true, shift: true): _SaveTemplateIntent(),
+        SingleActivator(LogicalKeyboardKey.enter, control: true): _PostIntent(),
+        SingleActivator(LogicalKeyboardKey.keyS, control: true): _SaveDraftIntent(),
+      },
+      child: Actions(
+        actions: {
+          _FocusScanIntent: CallbackAction<_FocusScanIntent>(onInvoke: (_) {
+            scanFocus.requestFocus();
+            return null;
+          }),
+          _BulkPasteIntent: CallbackAction<_BulkPasteIntent>(onInvoke: (_) {
+            _openBulkPaste(db);
+            return null;
+          }),
+          _SaveTemplateIntent: CallbackAction<_SaveTemplateIntent>(onInvoke: (_) {
+            _saveAsTemplate(db);
+            return null;
+          }),
+          _SaveDraftIntent: CallbackAction<_SaveDraftIntent>(onInvoke: (_) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved.')));
+            return null;
+          }),
+          _PostIntent: CallbackAction<_PostIntent>(onInvoke: (_) {
+            _quickPost(db, actor, workflow);
+            return null;
+          }),
+        },
+        child: Focus(autofocus: true, child: content),
+      ),
+    );
+  }
+
+  Future<void> _quickPost(dynamic db, AppUser actor, bool workflowEnabled) async {
+    final current = doc;
+    if (current == null) return;
+    final canPost = (workflowEnabled
+            ? current.status == 'APPROVED'
+            : (current.status == 'DRAFT' || current.status == 'APPROVED')) &&
+        actor.canPost;
+    if (!canPost) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cannot Post in current status')));
+      return;
+    }
+    await db.post(actor, current.id);
+    setState(() => doc = db.getDocument(current.id));
+  }
+
+  void _applyScan(dynamic db, String raw) {
+    final current = doc;
+    if (current == null) return;
+    final tokens = raw.trim().split(RegExp(r'\s+'));
+    for (final tok in tokens) {
+      final r = parseScan(tok);
+      if (r == null) continue;
+      switch (r.type) {
+        case 'LOC':
+          _applyLocCode(db, r.value);
+          break;
+        case 'FROM':
+          _applyLocCode(db, r.value, forceFrom: true);
+          break;
+        case 'TO':
+          _applyLocCode(db, r.value, forceTo: true);
+          break;
+        case 'SKU':
+          _applySkuCode(db, r.value);
+          break;
+        case 'LOT':
+          _applyLotCode(db, r.value);
+          break;
+        case 'QTY':
+          qtyCtrl.text = r.value;
+          break;
+        case 'UOM':
+          _applyUom(db, r.value);
+          break;
+        case 'STATUS':
+          setState(() => selectedStatus = r.value.toUpperCase());
+          break;
+      }
+    }
+
+    final okSku = selectedSkuId != null;
+    final okQty = (double.tryParse(qtyCtrl.text.trim()) ?? 0) > 0;
+    final okLoc = switch (current.docType) {
+      'IN' => selectedToLocId != null,
+      'OUT' => selectedFromLocId != null,
+      'TRF' => selectedFromLocId != null && selectedToLocId != null,
+      _ => selectedFromLocId != null,
+    };
+    final okReason = !(current.docType == 'ADJ' || current.docType == 'STATUS_MOVE') || selectedReason != null;
+    final okToStatus = current.docType != 'STATUS_MOVE' || selectedToStatus != null;
+
+    if (autoAdd && okSku && okQty && okLoc && okReason && okToStatus) {
+      _addLine(db);
+      if (current.docType == 'TRF') {
+        // prepare next scan quickly
+        _trfLocStep = 0;
+      }
+    }
+  }
+
+  void _applyLocCode(dynamic db, String code, {bool forceFrom = false, bool forceTo = false}) {
+    final current = doc;
+    if (current == null) return;
+    final c = code.trim().toUpperCase();
+    final locations = db.getLocations(warehouseCode: current.warehouseCode);
+    final found = locations.cast<dynamic?>().firstWhere(
+          (l) => (l.code as String).toUpperCase() == c,
+          orElse: () => null,
+        );
+    if (found == null) return;
+
+    setState(() {
+      if (forceFrom) {
+        selectedFromLocId = found.id;
+        return;
+      }
+      if (forceTo) {
+        selectedToLocId = found.id;
+        return;
+      }
+      if (current.docType == 'IN') {
+        selectedToLocId = found.id;
+      } else if (current.docType == 'OUT' || current.docType == 'ADJ' || current.docType == 'STATUS_MOVE') {
+        selectedFromLocId = found.id;
+      } else if (current.docType == 'TRF') {
+        if (_trfLocStep == 0) {
+          selectedFromLocId = found.id;
+          _trfLocStep = 1;
+        } else {
+          selectedToLocId = found.id;
+          _trfLocStep = 0;
+        }
+      } else {
+        selectedFromLocId = found.id;
+      }
+    });
+  }
+
+  void _applySkuCode(dynamic db, String code) {
+    final c = code.trim().toUpperCase();
+    final skus = db.getSkus();
+    final found = skus.cast<dynamic?>().firstWhere(
+          (s) => (s.code as String).toUpperCase() == c || (s.id as String).toUpperCase() == c,
+          orElse: () => null,
+        );
+    if (found == null) return;
+    final uoms = db.getUoms(found.id);
+    setState(() {
+      selectedSkuId = found.id;
+      selectedUom = uoms.isNotEmpty ? uoms.first.uom : 'PCS';
+      selectedLotId = null;
+    });
+  }
+
+  void _applyLotCode(dynamic db, String lotCode) {
+    final skuId = selectedSkuId;
+    if (skuId == null) return;
+    final c = lotCode.trim().toUpperCase();
+    final lots = db.getLots(skuId: skuId);
+    final found = lots.cast<dynamic?>().firstWhere(
+          (l) => (l.lotCode as String).toUpperCase() == c || (l.id as String).toUpperCase() == c,
+          orElse: () => null,
+        );
+    if (found == null) return;
+    setState(() => selectedLotId = found.id);
+  }
+
+  void _applyUom(dynamic db, String uom) {
+    final skuId = selectedSkuId;
+    if (skuId == null) return;
+    final c = uom.trim().toUpperCase();
+    final uoms = db.getUoms(skuId);
+    final found = uoms.cast<dynamic?>().firstWhere(
+          (u) => (u.uom as String).toUpperCase() == c,
+          orElse: () => null,
+        );
+    if (found == null) return;
+    setState(() => selectedUom = found.uom);
+  }
+
+  Future<void> _openBulkPaste(dynamic db) async {
+    final current = doc;
+    if (current == null) return;
+    final ctrl = TextEditingController();
+    await showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Bulk paste lines'),
+          content: SizedBox(
+            width: 640,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Mỗi dòng 1 line. Phân tách bằng TAB hoặc dấu phẩy.\n'
+                  'IN: toLoc, sku, lot(optional), qty, uom(optional), status(optional)\n'
+                  'OUT: fromLoc, sku, lot(optional), qty, uom(optional)\n'
+                  'TRF: fromLoc, toLoc, sku, lot(optional), qty, uom(optional)\n'
+                  'ADJ: loc, sku, lot(optional), qty, uom(optional), status(optional), reason(optional)\n'
+                  'STATUS_MOVE: loc, sku, lot(optional), qty, uom(optional), fromStatus(optional), toStatus(optional), reason(optional)',
+                  style: TextStyle(fontSize: 12),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: ctrl,
+                  minLines: 8,
+                  maxLines: 14,
+                  decoration: const InputDecoration(border: OutlineInputBorder(), hintText: 'LOC_A\tSKU_1\tLOT1\t10\tPCS'),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () async {
+                final actor = ref.read(currentUserProvider);
+                final lines = ctrl.text.split(RegExp(r'\r?\n'));
+                int ok = 0;
+                int fail = 0;
+                for (final raw in lines) {
+                  final s = raw.trim();
+                  if (s.isEmpty) continue;
+                  final cols = s.contains('\t') ? s.split('\t') : s.split(',');
+                  final c = cols.map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+                  try {
+                    await _addLineFromColumns(db, actor, current, c);
+                    ok++;
+                  } catch (_) {
+                    fail++;
+                  }
+                }
+                setState(() => doc = db.getDocument(current.id));
+                if (context.mounted) {
+                  Navigator.pop(ctx);
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Imported: $ok ok, $fail failed')));
+                }
+              },
+              child: const Text('Import'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _addLineFromColumns(dynamic db, AppUser actor, Document current, List<String> c) async {
+    // helper: lookup by code
+    String? locIdByCode(String code) {
+      final list = db.getLocations(warehouseCode: current.warehouseCode);
+      final u = code.trim().toUpperCase();
+      final found = list.cast<dynamic?>().firstWhere(
+            (l) => (l.code as String).toUpperCase() == u,
+            orElse: () => null,
+          );
+      return found?.id;
+    }
+
+    String? skuIdByCode(String code) {
+      final list = db.getSkus();
+      final u = code.trim().toUpperCase();
+      final found = list.cast<dynamic?>().firstWhere(
+            (s) => (s.code as String).toUpperCase() == u || (s.id as String).toUpperCase() == u,
+            orElse: () => null,
+          );
+      return found?.id;
+    }
+
+    String? lotIdByCode(String skuId, String code) {
+      final list = db.getLots(skuId: skuId);
+      final u = code.trim().toUpperCase();
+      final found = list.cast<dynamic?>().firstWhere(
+            (l) => (l.lotCode as String).toUpperCase() == u || (l.id as String).toUpperCase() == u,
+            orElse: () => null,
+          );
+      return found?.id;
+    }
+
+    String? fromLocId;
+    String? toLocId;
+    String skuId;
+    String? lotId;
+    double qty;
+    String uom = selectedUom ?? 'PCS';
+    String status = (current.docType == 'OUT' || current.docType == 'TRF') ? 'AVAILABLE' : selectedStatus;
+    String? toStatus;
+    String? reason;
+
+    if (current.docType == 'IN') {
+      if (c.length < 3) throw Exception('cols');
+      toLocId = locIdByCode(c[0]);
+      skuId = skuIdByCode(c[1]) ?? (throw Exception('sku'));
+      int idx = 2;
+      if (c[idx].isNotEmpty && double.tryParse(c[idx]) == null) {
+        lotId = lotIdByCode(skuId, c[idx]);
+        idx++;
+      }
+      qty = double.parse(c[idx]);
+      idx++;
+      if (idx < c.length) uom = c[idx];
+      idx++;
+      if (idx < c.length) status = c[idx].toUpperCase();
+    } else if (current.docType == 'OUT') {
+      if (c.length < 3) throw Exception('cols');
+      fromLocId = locIdByCode(c[0]);
+      skuId = skuIdByCode(c[1]) ?? (throw Exception('sku'));
+      int idx = 2;
+      if (c[idx].isNotEmpty && double.tryParse(c[idx]) == null) {
+        lotId = lotIdByCode(skuId, c[idx]);
+        idx++;
+      }
+      qty = double.parse(c[idx]);
+      idx++;
+      if (idx < c.length) uom = c[idx];
+    } else if (current.docType == 'TRF') {
+      if (c.length < 4) throw Exception('cols');
+      fromLocId = locIdByCode(c[0]);
+      toLocId = locIdByCode(c[1]);
+      skuId = skuIdByCode(c[2]) ?? (throw Exception('sku'));
+      int idx = 3;
+      if (c[idx].isNotEmpty && double.tryParse(c[idx]) == null) {
+        lotId = lotIdByCode(skuId, c[idx]);
+        idx++;
+      }
+      qty = double.parse(c[idx]);
+      idx++;
+      if (idx < c.length) uom = c[idx];
+      status = 'AVAILABLE';
+    } else if (current.docType == 'ADJ') {
+      if (c.length < 3) throw Exception('cols');
+      fromLocId = locIdByCode(c[0]);
+      skuId = skuIdByCode(c[1]) ?? (throw Exception('sku'));
+      int idx = 2;
+      if (c[idx].isNotEmpty && double.tryParse(c[idx]) == null) {
+        lotId = lotIdByCode(skuId, c[idx]);
+        idx++;
+      }
+      qty = double.parse(c[idx]);
+      idx++;
+      if (idx < c.length) uom = c[idx];
+      idx++;
+      if (idx < c.length) status = c[idx].toUpperCase();
+      idx++;
+      if (idx < c.length) reason = c[idx];
+    } else {
+      // STATUS_MOVE
+      if (c.length < 3) throw Exception('cols');
+      fromLocId = locIdByCode(c[0]);
+      skuId = skuIdByCode(c[1]) ?? (throw Exception('sku'));
+      int idx = 2;
+      if (c[idx].isNotEmpty && double.tryParse(c[idx]) == null) {
+        lotId = lotIdByCode(skuId, c[idx]);
+        idx++;
+      }
+      qty = double.parse(c[idx]);
+      idx++;
+      if (idx < c.length) uom = c[idx];
+      idx++;
+      if (idx < c.length) status = c[idx].toUpperCase();
+      idx++;
+      if (idx < c.length) toStatus = c[idx].toUpperCase();
+      idx++;
+      if (idx < c.length) reason = c[idx];
+      toStatus ??= (status == 'AVAILABLE' ? 'HOLD' : 'AVAILABLE');
+    }
+
+    final manualLotAllowed = actor.isSupervisor;
+    final finalLotId = (current.docType == 'OUT' && !manualLotAllowed) ? null : lotId;
+
+    final sku = db.getSkus().firstWhere((s) => s.id == skuId);
+    final qtyBase = db.convertToBaseOrThrow(sku, uom, qty);
+
+    final line = DocumentLine(
+      id: _uuid.v4(),
+      skuId: skuId,
+      lotId: finalLotId,
+      fromLocationId: current.docType == 'IN' ? null : fromLocId,
+      toLocationId: (current.docType == 'IN' || current.docType == 'TRF') ? toLocId : null,
+      status: status,
+      toStatus: current.docType == 'STATUS_MOVE' ? toStatus : null,
+      uom: uom,
+      qtyInput: qty,
+      qtyBase: qtyBase,
+      reasonCode: (current.docType == 'ADJ' || current.docType == 'STATUS_MOVE') ? (reason ?? selectedReason) : null,
+    );
+
+    await db.addLine(actor, current.id, line);
+  }
+
+  Future<void> _saveAsTemplate(dynamic db) async {
+    final current = doc;
+    if (current == null) return;
+    final nameCtrl = TextEditingController(text: '${current.docType}-${current.docNo}');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Save as Template'),
+          content: TextField(
+            controller: nameCtrl,
+            decoration: const InputDecoration(labelText: 'Template name', border: OutlineInputBorder()),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save')),
+          ],
+        );
+      },
+    );
+    if (ok != true) return;
+    final actor = ref.read(currentUserProvider);
+    await db.saveTemplateFromDocument(actor: actor, docId: current.id, name: nameCtrl.text.trim());
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Template saved')));
+    }
   }
 
   Widget _leftPanel(
@@ -116,6 +589,85 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
           children: [
             Text(t.scanInput, style: const TextStyle(fontWeight: FontWeight.w900)),
             const SizedBox(height: 12),
+
+            TextField(
+              controller: scanCtrl,
+              focusNode: scanFocus,
+              decoration: const InputDecoration(
+                labelText: 'Scan / paste (LOC:... SKU:... LOT:... QTY:...)',
+                prefixIcon: Icon(Icons.qr_code_scanner),
+                border: OutlineInputBorder(),
+              ),
+              textInputAction: TextInputAction.done,
+              onSubmitted: (raw) {
+                _applyScan(db, raw);
+                scanCtrl.clear();
+              },
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: DropdownButtonFormField<String>(
+                    value: selectedStatus,
+                    decoration: const InputDecoration(
+                      labelText: 'Status',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 'AVAILABLE', child: Text('AVAILABLE')),
+                      DropdownMenuItem(value: 'HOLD', child: Text('HOLD')),
+                    ],
+                    onChanged: (v) => setState(() => selectedStatus = v ?? 'AVAILABLE'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: (current.docType == 'STATUS_MOVE')
+                      ? DropdownButtonFormField<String>(
+                          value: selectedToStatus,
+                          decoration: const InputDecoration(
+                            labelText: 'To Status',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          items: const [
+                            DropdownMenuItem(value: 'AVAILABLE', child: Text('AVAILABLE')),
+                            DropdownMenuItem(value: 'HOLD', child: Text('HOLD')),
+                          ],
+                          onChanged: (v) => setState(() => selectedToStatus = v),
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: SwitchListTile.adaptive(
+                    value: autoAdd,
+                    onChanged: (v) => setState(() => autoAdd = v),
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Auto-add on complete scan', style: TextStyle(fontSize: 12)),
+                  ),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => _openBulkPaste(db),
+                  icon: const Icon(Icons.playlist_add),
+                  label: const Text('Bulk paste'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: () => _saveAsTemplate(db),
+                  icon: const Icon(Icons.bookmark_add_outlined),
+                  label: const Text('Template'),
+                ),
+              ],
+            ),
+            const Divider(height: 22),
 
             if (current.docType == 'IN') ...[
               _ddLoc('To LOC', selectedToLocId, locations, (v) => setState(() => selectedToLocId = v)),
@@ -267,7 +819,7 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
     );
   }
 
-  Widget _bottomBar(dynamic db, AppUser actor, Document current) {
+  Widget _bottomBar(dynamic db, AppUser actor, Document current, bool workflowEnabled) {
     Future<void> reload() async => setState(() => doc = db.getDocument(current.id));
 
     Future<void> act(Future<void> Function() fn) async {
@@ -282,9 +834,11 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
       }
     }
 
-    final canSubmit = current.status == 'DRAFT';
-    final canApprove = current.status == 'SUBMITTED' && actor.canApprove;
-    final canPost = current.status == 'APPROVED' && actor.canPost;
+    final canSubmit = workflowEnabled && current.status == 'DRAFT';
+    final canApprove = workflowEnabled && current.status == 'SUBMITTED' && actor.canApprove;
+    final canPost = (workflowEnabled
+            ? current.status == 'APPROVED'
+            : (current.status == 'DRAFT' || current.status == 'APPROVED')) && actor.canPost;
 
     return Card(
       child: Padding(
@@ -317,16 +871,28 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
             ),
             const SizedBox(width: 8),
 
-            ElevatedButton(
-              onPressed: canSubmit ? () => act(() => db.submit(actor, current.id)) : null,
-              child: const Text('Submit'),
-            ),
-            const SizedBox(width: 8),
-            ElevatedButton(
-              onPressed: canApprove ? () => act(() => db.approve(actor, current.id)) : null,
-              child: const Text('Approve'),
-            ),
-            const SizedBox(width: 8),
+            if (workflowEnabled) ...[
+              ElevatedButton(
+                onPressed: canSubmit ? () => act(() => db.submit(actor, current.id)) : null,
+                child: const Text('Submit'),
+              ),
+              const SizedBox(width: 8),
+              ElevatedButton(
+                onPressed: canApprove ? () => act(() => db.approve(actor, current.id)) : null,
+                child: const Text('Approve'),
+              ),
+              const SizedBox(width: 8),
+            ] else ...[
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.blueGrey.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: const Text('Workflow OFF', style: TextStyle(fontWeight: FontWeight.w800, color: Colors.black54)),
+              ),
+              const SizedBox(width: 8),
+            ],
             ElevatedButton(
               onPressed: canPost ? () => act(() => db.post(actor, current.id)) : null,
               child: const Text('Post'),
@@ -421,14 +987,22 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
     final manualLotAllowed = actor.isSupervisor;
     final lotId = (current.docType == 'OUT' && !manualLotAllowed) ? null : selectedLotId;
 
+    final enforcedStatus = (current.docType == 'OUT' || current.docType == 'TRF') ? 'AVAILABLE' : selectedStatus;
+    final toStatus = current.docType == 'STATUS_MOVE' ? selectedToStatus : null;
+
+    if (current.docType == 'STATUS_MOVE' && toStatus == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('STATUS_MOVE requires To Status')));
+      return;
+    }
+
     final line = DocumentLine(
       id: _uuid.v4(),
       skuId: selectedSkuId!,
       lotId: lotId, // OUT staff => null => FEFO
-      fromLocationId: current.docType == 'IN' ? null : selectedFromLocId,
+      fromLocationId: (current.docType == 'IN') ? null : selectedFromLocId,
       toLocationId: (current.docType == 'IN' || current.docType == 'TRF') ? selectedToLocId : null,
-      status: 'AVAILABLE',
-      toStatus: current.docType == 'STATUS_MOVE' ? 'HOLD' : null,
+      status: enforcedStatus,
+      toStatus: toStatus,
       uom: selectedUom!,
       qtyInput: qtyInput,
       qtyBase: qtyBase,

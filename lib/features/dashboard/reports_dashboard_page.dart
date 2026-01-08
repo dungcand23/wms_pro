@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:wms_pro/l10n/gen/app_localizations.dart';
+import 'package:wms_pro/l10n/app_localizations.dart';
 
 import '../../ui/widgets/section_title.dart';
 
@@ -8,7 +8,7 @@ class ReportsDashboardPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = AppLocalizations.of(context);
+    final t = AppLocalizations.of(context)!;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,

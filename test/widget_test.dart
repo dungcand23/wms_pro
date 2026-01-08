@@ -40,7 +40,8 @@ void main() {
       ProviderScope(
         overrides: [
           sharedPrefsProvider.overrideWithValue(prefs),
-          localeProvider.overrideWith((ref) => const Locale('vi')),
+          // localeProvider is a StateNotifierProvider -> override must return LocaleNotifier
+          localeProvider.overrideWith((ref) => LocaleNotifier(prefs)),
           localDbProvider.overrideWithValue(db),
         ],
         child: const WmsApp(),

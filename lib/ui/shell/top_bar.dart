@@ -1,8 +1,10 @@
-// lib/ui/shell/top_bar.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/providers.dart';
+import '../../core/sync/sync_controller.dart';
+import '../dialogs/global_search_dialog.dart';
+import '../dialogs/new_doc_dialog.dart';
 
 class TopBar extends ConsumerWidget {
   const TopBar({super.key});
@@ -11,96 +13,76 @@ class TopBar extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final wh = ref.watch(warehouseProvider);
     final user = ref.watch(currentUserProvider);
+    final online = ref.watch(isOnlineProvider).value ?? false;
+    final syncEnabled = ref.watch(syncEnabledProvider);
+    final sync = ref.watch(syncStatusProvider);
 
     return Container(
       height: 56,
       padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        border: Border(
-          bottom: BorderSide(color: Theme.of(context).dividerColor.withOpacity(0.4)),
-        ),
+        color: Colors.white,
+        border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
       ),
       child: Row(
         children: [
-          // LEFT (always shrink safely)
-          Expanded(
-            child: Row(
-              children: [
-                const Icon(Icons.warehouse_outlined, size: 20),
-                const SizedBox(width: 8),
-                Flexible(
-                  child: Text(
-                    'WMS Pro',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w900),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Flexible(
-                  child: Text(
-                    'WH: $wh',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.onSurface.withOpacity(0.7),
-                      fontSize: 12,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
+          Text(wh, style: const TextStyle(fontWeight: FontWeight.w900)),
+          const SizedBox(width: 10),
+          _pill(label: user.name, ok: true),
+          const SizedBox(width: 6),
+          _pill(label: user.role),
+          const SizedBox(width: 6),
+          _pill(label: online ? 'Online' : 'Offline', ok: online),
+          const SizedBox(width: 6),
+          if (syncEnabled) ...[
+            _pill(label: sync.isSyncing ? 'Syncing…' : 'Sync ON', ok: true),
+            const SizedBox(width: 6),
+            if (sync.lastError != null) _pill(label: 'Sync error', ok: false),
+            if (sync.lastError != null) const SizedBox(width: 6),
+            if (sync.lastSyncIso != null) _pill(label: 'Last ${_hhmm(sync.lastSyncIso!)}', ok: true),
+            const SizedBox(width: 6),
+          ],
 
-          const SizedBox(width: 8),
+          const Spacer(),
 
-          // RIGHT ACTIONS (scrollable => never overflow)
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 360),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _chip('Role: ${user.role}'),
-                  const SizedBox(width: 8),
-                  IconButton(
-                    tooltip: 'Refresh',
-                    onPressed: () {
-                      // placeholder: bạn có thể gọi ref.invalidate(...) nếu cần
-                    },
-                    icon: const Icon(Icons.refresh),
-                  ),
-                  IconButton(
-                    tooltip: 'Settings',
-                    onPressed: () {
-                      // placeholder
-                    },
-                    icon: const Icon(Icons.settings_outlined),
-                  ),
-                ],
-              ),
-            ),
+          IconButton(
+            tooltip: 'Global search (Ctrl+K)',
+            onPressed: () => showDialog(context: context, builder: (_) => const GlobalSearchDialog()),
+            icon: const Icon(Icons.search),
           ),
+          const SizedBox(width: 4),
+          FilledButton.icon(
+            onPressed: () => showDialog(context: context, builder: (_) => const NewDocDialog()),
+            icon: const Icon(Icons.add),
+            label: const Text('New'),
+          ),
+          const SizedBox(width: 10),
         ],
       ),
     );
   }
 
-  Widget _chip(String text) {
+  Widget _pill({required String label, bool? ok}) {
+    final color = ok == null ? Colors.blueGrey : (ok ? Colors.green : Colors.red);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        border: Border.all(color: color.withOpacity(0.4)),
         borderRadius: BorderRadius.circular(999),
-        color: Colors.black.withOpacity(0.05),
       ),
-      child: Text(
-        text,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
-      ),
+      child: Text(label, style: TextStyle(fontWeight: FontWeight.w800, color: color, fontSize: 12)),
     );
+  }
+
+  String _hhmm(String iso) {
+    try {
+      final dt = DateTime.parse(iso).toLocal();
+      final hh = dt.hour.toString().padLeft(2, '0');
+      final mm = dt.minute.toString().padLeft(2, '0');
+      return '$hh:$mm';
+    } catch (_) {
+      return '--:--';
+    }
   }
 }

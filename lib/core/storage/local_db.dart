@@ -13,6 +13,8 @@ import '../models/lot.dart';
 import '../models/sku.dart';
 import '../models/uom.dart';
 import '../models/user.dart';
+import '../models/saved_view.dart';
+import '../models/document_template.dart';
 
 class LocalDb {
   // ✅ Boxes (Hive)
@@ -33,6 +35,10 @@ class LocalDb {
   final Box<String> auditBox;
   final Box<String> attachmentsBox;
 
+  // Phase 6
+  final Box<String> templatesBox;
+  final Box<String> savedViewsBox;
+
   final _uuid = const Uuid();
 
   LocalDb._({
@@ -48,6 +54,8 @@ class LocalDb {
     required this.reasonsBox,
     required this.auditBox,
     required this.attachmentsBox,
+    required this.templatesBox,
+    required this.savedViewsBox,
   });
 
   static Future<LocalDb> open() async {
@@ -67,6 +75,10 @@ class LocalDb {
     final audits = await Hive.openBox<String>('audits');
     final attachments = await Hive.openBox<String>('attachments');
 
+    // Phase 6
+    final templates = await Hive.openBox<String>('doc_templates');
+    final savedViews = await Hive.openBox<String>('saved_views');
+
     final db = LocalDb._(
       skusBox: skus,
       uomsBox: uoms,
@@ -80,6 +92,8 @@ class LocalDb {
       reasonsBox: reasons,
       auditBox: audits,
       attachmentsBox: attachments,
+      templatesBox: templates,
+      savedViewsBox: savedViews,
     );
 
     await db._seedIfEmpty();
@@ -226,6 +240,18 @@ class LocalDb {
     return res;
   }
 
+  /// Phase 8 Sync helper: return ALL UOM conversions in local DB.
+  ///
+  /// Local key format is `skuId|uom` but the object doesn't store the key.
+  /// Server side can reconstruct `id` from skuId+uom.
+  List<SkuUom> getAllUoms() {
+    final res = <SkuUom>[];
+    for (final v in uomsBox.values) {
+      res.add(SkuUom.fromJson(jsonDecode(v)));
+    }
+    return res;
+  }
+
   SkuUom? findUom(String skuId, String uom) {
     final key = '$skuId|$uom';
     final v = uomsBox.get(key);
@@ -233,7 +259,178 @@ class LocalDb {
     return SkuUom.fromJson(jsonDecode(v));
   }
 
+  /// Phase 8 Sync helper: return ALL saved views across modules.
+  List<SavedView> getAllSavedViews() {
+    final res = <SavedView>[];
+    for (final v in savedViewsBox.values) {
+      res.add(SavedView.fromJson(jsonDecode(v)));
+    }
+    res.sort((a, b) => a.module.compareTo(b.module));
+    return res;
+  }
+
+  /// Phase 8 Sync helper: apply remote payload JSON into local Hive boxes.
+  /// Returns 1 if applied, else 0.
+  ///
+  /// NOTE: We intentionally do NOT create audit logs for remote sync.
+  Future<int> applyRemoteJson(Map<String, dynamic> payload) async {
+    // Documents
+    if (payload.containsKey('docNo') && payload.containsKey('docType') && payload.containsKey('lines')) {
+      final id = payload['id']?.toString();
+      if (id == null || id.isEmpty) return 0;
+      await docsBox.put(id, jsonEncode(payload));
+      return 1;
+    }
+
+    // Balances
+    if (payload.containsKey('key') && payload.containsKey('qtyBase')) {
+      final key = payload['key']?.toString();
+      if (key == null || key.isEmpty) return 0;
+      await balanceBox.put(key, jsonEncode(payload));
+      return 1;
+    }
+
+    // Ledger
+    if (payload.containsKey('qtyDeltaBase') && payload.containsKey('tsIso')) {
+      final id = payload['id']?.toString();
+      if (id == null || id.isEmpty) return 0;
+      await ledgerBox.put(id, jsonEncode(payload));
+      return 1;
+    }
+
+    // SKU
+    if (payload.containsKey('code') && payload.containsKey('baseUom') && payload.containsKey('baseType')) {
+      final id = payload['id']?.toString();
+      if (id == null || id.isEmpty) return 0;
+      await skusBox.put(id, jsonEncode(payload));
+      return 1;
+    }
+
+    // Location
+    if (payload.containsKey('warehouseCode') && payload.containsKey('type') && payload.containsKey('parentId')) {
+      final id = payload['id']?.toString();
+      if (id == null || id.isEmpty) return 0;
+      await locationsBox.put(id, jsonEncode(payload));
+      return 1;
+    }
+
+    // Lot
+    if (payload.containsKey('lotCode') && payload.containsKey('skuId') && payload.containsKey('blocked')) {
+      final id = payload['id']?.toString();
+      if (id == null || id.isEmpty) return 0;
+      await lotsBox.put(id, jsonEncode(payload));
+      return 1;
+    }
+
+    // UOM
+    if (payload.containsKey('skuId') && payload.containsKey('uom') && payload.containsKey('factorToBase')) {
+      final skuId = payload['skuId']?.toString();
+      final uom = payload['uom']?.toString();
+      if (skuId == null || uom == null || skuId.isEmpty || uom.isEmpty) return 0;
+      final key = '$skuId|$uom';
+      await uomsBox.put(key, jsonEncode(payload));
+      return 1;
+    }
+
+    // SavedView
+    if (payload.containsKey('module') && payload.containsKey('isDefault') && payload.containsKey('payload')) {
+      final id = payload['id']?.toString();
+      if (id == null || id.isEmpty) return 0;
+      await savedViewsBox.put(id, jsonEncode(payload));
+      return 1;
+    }
+
+    // Template
+    if (payload.containsKey('docType') && payload.containsKey('name') && payload.containsKey('lines')) {
+      final id = payload['id']?.toString();
+      if (id == null || id.isEmpty) return 0;
+      await templatesBox.put(id, jsonEncode(payload));
+      return 1;
+    }
+
+    return 0;
+  }
+
   List<String> getReasonCodes() => reasonsBox.values.cast<String>().toList();
+
+  // ============================================================
+  // MASTER DATA WRITE APIs (Phase 4/5)
+  // ============================================================
+
+  Future<void> upsertSku(AppUser actor, Sku sku) async {
+    final beforeRaw = skusBox.get(sku.id);
+    final before = beforeRaw == null ? null : Sku.fromJson(jsonDecode(beforeRaw));
+    // Validate unique code
+    final dup = getSkus().where((s) => s.code == sku.code && s.id != sku.id).isNotEmpty;
+    if (dup) throw Exception('SKU code already exists: ${sku.code}');
+
+    await skusBox.put(sku.id, jsonEncode(sku.toJson()));
+    await _audit(
+      actor: actor,
+      entityType: 'SKU',
+      entityId: sku.id,
+      action: before == null ? 'CREATE' : 'UPDATE',
+      changedFields: const ['code', 'name', 'baseType', 'baseUom'],
+      beforeJson: before?.toJson(),
+      afterJson: sku.toJson(),
+    );
+  }
+
+  Future<void> deleteSku(AppUser actor, String skuId) async {
+    final beforeRaw = skusBox.get(skuId);
+    if (beforeRaw == null) return;
+    final before = Sku.fromJson(jsonDecode(beforeRaw));
+
+    await skusBox.delete(skuId);
+    await _audit(
+      actor: actor,
+      entityType: 'SKU',
+      entityId: skuId,
+      action: 'DELETE',
+      changedFields: const [],
+      beforeJson: before.toJson(),
+      afterJson: null,
+    );
+  }
+
+  Future<void> upsertLocation(AppUser actor, LocationNode loc) async {
+    // Validate unique code in warehouse
+    final dup = getLocations(warehouseCode: loc.warehouseCode)
+        .where((l) => l.code == loc.code && l.id != loc.id)
+        .isNotEmpty;
+    if (dup) throw Exception('Location code already exists: ${loc.code}');
+
+    final beforeRaw = locationsBox.get(loc.id);
+    final before = beforeRaw == null ? null : LocationNode.fromJson(jsonDecode(beforeRaw));
+
+    await locationsBox.put(loc.id, jsonEncode(loc.toJson()));
+    await _audit(
+      actor: actor,
+      entityType: 'LOC',
+      entityId: loc.id,
+      action: before == null ? 'CREATE' : 'UPDATE',
+      changedFields: const ['warehouseCode', 'code', 'parentId', 'type'],
+      beforeJson: before?.toJson(),
+      afterJson: loc.toJson(),
+    );
+  }
+
+  Future<void> deleteLocation(AppUser actor, String locId) async {
+    final beforeRaw = locationsBox.get(locId);
+    if (beforeRaw == null) return;
+    final before = LocationNode.fromJson(jsonDecode(beforeRaw));
+
+    await locationsBox.delete(locId);
+    await _audit(
+      actor: actor,
+      entityType: 'LOC',
+      entityId: locId,
+      action: 'DELETE',
+      changedFields: const [],
+      beforeJson: before.toJson(),
+      afterJson: null,
+    );
+  }
 
   List<Document> getDocuments() {
     final res = docsBox.values.map((s) => Document.fromJson(jsonDecode(s))).toList();
@@ -256,10 +453,228 @@ class LocalDb {
     return res;
   }
 
+  // ============================================================
+  // Phase 6: Templates + Saved Views
+  // ============================================================
+
+  List<DocumentTemplate> getDocTemplates({String? docType}) {
+    final res = templatesBox.values
+        .map((s) => DocumentTemplate.fromJson(jsonDecode(s)))
+        .toList();
+    res.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    if (docType == null) return res;
+    return res.where((t) => t.docType == docType).toList();
+  }
+
+  DocumentTemplate? getDocTemplate(String id) {
+    final raw = templatesBox.get(id);
+    if (raw == null) return null;
+    return DocumentTemplate.fromJson(jsonDecode(raw));
+  }
+
+  Future<DocumentTemplate> saveTemplateFromDocument({
+    required AppUser actor,
+    required String docId,
+    required String name,
+  }) async {
+    final doc = getDocument(docId);
+    if (doc == null) throw Exception('Document not found');
+    final now = DateTime.now().toIso8601String();
+
+    final tpl = DocumentTemplate(
+      id: _uuid.v4(),
+      name: name,
+      docType: doc.docType,
+      note: doc.note,
+      createdAtIso: now,
+      createdBy: actor.id,
+      lines: doc.lines,
+    );
+
+    await templatesBox.put(tpl.id, jsonEncode(tpl.toJson()));
+    return tpl;
+  }
+
+  Future<void> deleteTemplate(String templateId) async {
+    await templatesBox.delete(templateId);
+  }
+
+  Future<Document> createDocumentFromTemplate({
+    required AppUser actor,
+    required String templateId,
+    required String warehouseCode,
+  }) async {
+    final tpl = getDocTemplate(templateId);
+    if (tpl == null) throw Exception('Template not found');
+
+    final created = await createNewDocument(actor: actor, docType: tpl.docType, warehouseCode: warehouseCode);
+    // copy lines with new IDs
+    final newLines = tpl.lines
+        .map(
+          (ln) => DocumentLine(
+            id: _uuid.v4(),
+            skuId: ln.skuId,
+            lotId: ln.lotId,
+            fromLocationId: ln.fromLocationId,
+            toLocationId: ln.toLocationId,
+            status: ln.status,
+            toStatus: ln.toStatus,
+            uom: ln.uom,
+            qtyInput: ln.qtyInput,
+            qtyBase: ln.qtyBase,
+            reasonCode: ln.reasonCode,
+          ),
+        )
+        .toList();
+
+    final updated = created.copyWith(
+      note: tpl.note,
+      updatedAtIso: DateTime.now().toIso8601String(),
+      lines: newLines,
+    );
+
+    await saveDocument(actor, updated, auditAction: 'UPDATE');
+    return updated;
+  }
+
+  Future<Document> duplicateDocument({
+    required AppUser actor,
+    required String sourceDocId,
+  }) async {
+    final src = getDocument(sourceDocId);
+    if (src == null) throw Exception('Document not found');
+    final created = await createNewDocument(actor: actor, docType: src.docType, warehouseCode: src.warehouseCode);
+
+    final newLines = src.lines
+        .map(
+          (ln) => DocumentLine(
+            id: _uuid.v4(),
+            skuId: ln.skuId,
+            lotId: ln.lotId,
+            fromLocationId: ln.fromLocationId,
+            toLocationId: ln.toLocationId,
+            status: ln.status,
+            toStatus: ln.toStatus,
+            uom: ln.uom,
+            qtyInput: ln.qtyInput,
+            qtyBase: ln.qtyBase,
+            reasonCode: ln.reasonCode,
+          ),
+        )
+        .toList();
+
+    final updated = created.copyWith(
+      note: src.note,
+      updatedAtIso: DateTime.now().toIso8601String(),
+      lines: newLines,
+    );
+    await saveDocument(actor, updated, auditAction: 'UPDATE');
+    return updated;
+  }
+
+  List<SavedView> getSavedViews(String module) {
+    final res = savedViewsBox.values
+        .map((s) => SavedView.fromJson(jsonDecode(s)))
+        .where((v) => v.module == module)
+        .toList();
+    // default first, then alpha
+    res.sort((a, b) {
+      if (a.isDefault != b.isDefault) return a.isDefault ? -1 : 1;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+    return res;
+  }
+
+  SavedView? getDefaultView(String module) {
+    final views = getSavedViews(module);
+    for (final v in views) {
+      if (v.isDefault) return v;
+    }
+    return null;
+  }
+
+  Future<SavedView> saveView({
+    required String module,
+    required String name,
+    required Map<String, dynamic> payload,
+    required bool makeDefault,
+  }) async {
+    final now = DateTime.now().toIso8601String();
+    final id = _uuid.v4();
+
+    if (makeDefault) {
+      // clear current default(s)
+      for (final v in getSavedViews(module)) {
+        if (v.isDefault) {
+          final cleared = SavedView(
+            id: v.id,
+            module: v.module,
+            name: v.name,
+            isDefault: false,
+            createdAtIso: v.createdAtIso,
+            payload: v.payload,
+          );
+          await savedViewsBox.put(cleared.id, jsonEncode(cleared.toJson()));
+        }
+      }
+    }
+
+    final view = SavedView(
+      id: id,
+      module: module,
+      name: name,
+      isDefault: makeDefault,
+      createdAtIso: now,
+      payload: payload,
+    );
+    await savedViewsBox.put(view.id, jsonEncode(view.toJson()));
+    return view;
+  }
+
+  Future<void> deleteView(String viewId) async {
+    await savedViewsBox.delete(viewId);
+  }
+
+  Future<void> setDefaultView({required String module, required String viewId}) async {
+    // clear defaults
+    for (final v in getSavedViews(module)) {
+      if (v.isDefault) {
+        final cleared = SavedView(
+          id: v.id,
+          module: v.module,
+          name: v.name,
+          isDefault: false,
+          createdAtIso: v.createdAtIso,
+          payload: v.payload,
+        );
+        await savedViewsBox.put(cleared.id, jsonEncode(cleared.toJson()));
+      }
+    }
+
+    final raw = savedViewsBox.get(viewId);
+    if (raw == null) return;
+    final v = SavedView.fromJson(jsonDecode(raw));
+    if (v.module != module) return;
+    final updated = SavedView(
+      id: v.id,
+      module: v.module,
+      name: v.name,
+      isDefault: true,
+      createdAtIso: v.createdAtIso,
+      payload: v.payload,
+    );
+    await savedViewsBox.put(updated.id, jsonEncode(updated.toJson()));
+  }
+
   // Streams for UI refresh
   Stream<void> watchDocs() => docsBox.watch().map((_) {});
   Stream<void> watchBalances() => balanceBox.watch().map((_) {});
 
+  Stream<void> watchLedger() => ledgerBox.watch().map((_) {});
+  Stream<void> watchMaster() => skusBox.watch().map((_) {});
+
+  Stream<void> watchTemplates() => templatesBox.watch().map((_) {});
+  Stream<void> watchViews() => savedViewsBox.watch().map((_) {});
   // ============================================================
   // AUDIT (Phase 3 B-level)
   // ============================================================
