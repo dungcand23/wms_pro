@@ -95,7 +95,7 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
 
   @override
   Widget build(BuildContext context) {
-    final t = AppLocalizations.of(context)!;
+    final t = AppLocalizations.of(context);
     final db = ref.watch(localDbProvider);
     final actor = ref.watch(currentUserProvider);
     final workflow = ref.watch(workflowEnabledProvider);
@@ -142,7 +142,7 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
           ),
         ),
         const SizedBox(height: 10),
-        _bottomBar(db, actor, current, workflow),
+        _bottomBar(db, actor, current),
       ],
     );
 
@@ -646,12 +646,20 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
             Row(
               children: [
                 Expanded(
-                  child: SwitchListTile.adaptive(
-                    value: autoAdd,
-                    onChanged: (v) => setState(() => autoAdd = v),
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Auto-add on complete scan', style: TextStyle(fontSize: 12)),
+                  child: Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Auto-add on complete scan',
+                          style: TextStyle(fontSize: 12),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      Switch.adaptive(
+                        value: autoAdd,
+                        onChanged: (v) => setState(() => autoAdd = v),
+                      ),
+                    ],
                   ),
                 ),
                 OutlinedButton.icon(
@@ -819,7 +827,7 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
     );
   }
 
-  Widget _bottomBar(dynamic db, AppUser actor, Document current, bool workflowEnabled) {
+  Widget _bottomBar(dynamic db, AppUser actor, Document current) {
     Future<void> reload() async => setState(() => doc = db.getDocument(current.id));
 
     Future<void> act(Future<void> Function() fn) async {
@@ -834,9 +842,9 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
       }
     }
 
-    final canSubmit = workflowEnabled && current.status == 'DRAFT';
-    final canApprove = workflowEnabled && current.status == 'SUBMITTED' && actor.canApprove;
-    final canPost = (workflowEnabled
+    final canSubmit = workflow && current.status == 'DRAFT';
+    final canApprove = workflow && current.status == 'SUBMITTED' && actor.canApprove;
+    final canPost = (workflow
             ? current.status == 'APPROVED'
             : (current.status == 'DRAFT' || current.status == 'APPROVED')) && actor.canPost;
 
@@ -871,7 +879,7 @@ class _DocumentEditorPageState extends ConsumerState<DocumentEditorPage> {
             ),
             const SizedBox(width: 8),
 
-            if (workflowEnabled) ...[
+            if (workflow) ...[
               ElevatedButton(
                 onPressed: canSubmit ? () => act(() => db.submit(actor, current.id)) : null,
                 child: const Text('Submit'),

@@ -21,8 +21,6 @@
   "quickSearch": "Quick Search (Ctrl+K)",
   "newButton": "New",
   "warehouse": "Warehouse",
-  "location": "Location",
-  "status": "Status",
   "language": "Language",
   "waitingApproval": "Waiting Approval",
   "waitingPost": "Waiting Post",
@@ -46,5 +44,7 @@
   "refresh": "Refresh",
   "cancel": "Cancel",
   "approveAltA": "Approve (Alt+A)",
-  "postAltP": "Post (Alt+P)"
+  "postAltP": "Post (Alt+P)",
+  "location": "Location",
+  "status": "Status"
 }

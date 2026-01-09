@@ -21,8 +21,6 @@
   "quickSearch": "Tìm kiếm nhanh (Ctrl+K)",
   "newButton": "Tạo",
   "warehouse": "Kho",
-  "location": "Vị trí",
-  "status": "Trạng thái",
   "language": "Ngôn ngữ",
   "waitingApproval": "Chờ duyệt",
   "waitingPost": "Chờ post",
@@ -46,5 +44,7 @@
   "refresh": "Làm mới",
   "cancel": "Huỷ",
   "approveAltA": "Duyệt (Alt+A)",
-  "postAltP": "Post (Alt+P)"
+  "postAltP": "Post (Alt+P)",
+  "location": "Vị trí",
+  "status": "Trạng thái"
 }
